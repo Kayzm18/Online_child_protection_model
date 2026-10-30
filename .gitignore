@@ -1,0 +1,10 @@
+venv/
+data/
+eval/results/*.json
+.env
+__pycache__/
+*.pyc
+.ipynb_checkpoints
+.DS_Store
+model_weights/
+.vs/
