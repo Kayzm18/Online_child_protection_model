@@ -5,23 +5,24 @@ sys.path.append(str(ROOT_DIR))
 
 import json
 import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AdamW
+from torch.utils.data import Dataset, DataLoader, Subset
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from torch.optim import AdamW
 from peft import get_peft_model, LoraConfig, TaskType
+import numpy as np
 
-MODEL_NAME = "distilbert-base-uncased"  # Fast, robust encoder backbone for classification
+MODEL_NAME = "distilbert-base-uncased"
 MAX_LENGTH = 128
 BATCH_SIZE = 16
-EPOCHS = 1
-LR = 2e-5
+EPOCHS = 3  # Increased to 3 epochs for proper convergence
+LR = 3e-5   # Slightly optimized learning rate
 
 class ChatDataset(Dataset):
     def __init__(self, jsonl_path: Path, tokenizer, max_length: int):
         self.data = []
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
-                item = json.loads(line)
-                self.data.append(item)
+                self.data.append(json.loads(line))
         self.tokenizer = tokenizer
         self.max_length = max_length
 
@@ -35,8 +36,8 @@ class ChatDataset(Dataset):
             truncation=True,
             max_length=self.max_length,
             padding="max_length",
-            return_tensors="pt")
-        
+            return_tensors="pt"
+        )
         return {
             "input_ids": encoding["input_ids"].squeeze(0),
             "attention_mask": encoding["attention_mask"].squeeze(0),
@@ -48,7 +49,6 @@ def train_v1():
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     base_model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=2)
 
-    # Apply LoRA for parameter-efficient tuning (Meta tooling alignment)
     peft_config = LoraConfig(
         task_type=TaskType.SEQ_CLS,
         r=8,
@@ -61,21 +61,27 @@ def train_v1():
 
     train_path = ROOT_DIR / "data/processed/train.jsonl"
     dataset = ChatDataset(train_path, tokenizer, MAX_LENGTH)
-    # Use a small subset (e.g., 2000 samples) for fast hackathon training speed
-    from torch.utils.data import Subset
-    import numpy as np
-    subset_indices = np.random.choice(len(dataset), size=min(2000, len(dataset)), replace=False)
-    train_subset = Subset(dataset, subset_indices)
+
+    # Create a balanced subset (all available positives + equal negatives for robust learning)
+    pos_indices = [i for i, item in enumerate(dataset.data) if item["label"] == 1]
+    neg_indices = [i for i, item in enumerate(dataset.data) if item["label"] == 0]
     
+    np.random.seed(42)
+    selected_pos = np.random.choice(pos_indices, size=min(len(pos_indices), 1000), replace=False)
+    selected_neg = np.random.choice(neg_indices, size=min(len(neg_indices), 1000), replace=False)
+    balanced_indices = np.concatenate([selected_pos, selected_neg])
+    np.random.shuffle(balanced_indices)
+
+    train_subset = Subset(dataset, balanced_indices.tolist())
     loader = DataLoader(train_subset, batch_size=BATCH_SIZE, shuffle=True)
 
     optimizer = AdamW(model.parameters(), lr=LR)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    print(f"Training v1 model on {device} for {EPOCHS} epoch(s)...")
-    model.train()
+    print(f"Training v1 balanced model on {device} for {EPOCHS} epochs ({len(balanced_indices)} samples)...")
     for epoch in range(EPOCHS):
+        model.train()
         total_loss = 0
         for batch in loader:
             optimizer.zero_grad()
@@ -89,14 +95,13 @@ def train_v1():
 
             loss.backward()
             optimizer.step()
-        print(f"Epoch {epoch+1} Loss: {total_loss / len(loader):.4f}")
+        print(f"Epoch {epoch+1}/{EPOCHS} Loss: {total_loss / len(loader):.4f}")
 
-    # Save model
     out_dir = ROOT_DIR / "model_weights/v1_classifier"
     out_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(out_dir)
     tokenizer.save_pretrained(out_dir)
-    print(f"v1 LoRA model saved successfully to {out_dir}!")
+    print(f"v1 Balanced LoRA model saved successfully to {out_dir}!")
 
 if __name__ == "__main__":
     train_v1()
